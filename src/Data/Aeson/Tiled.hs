@@ -18,15 +18,17 @@ module Data.Aeson.Tiled
   ) where
 
 import           Control.Applicative        ((<|>))
+import           Control.Arrow ((&&&))
 import           Control.Monad              (forM)
-import           Data.Aeson                 hiding (Object)
 import qualified Data.Aeson                 as A
+import           Data.Aeson                 hiding (Object)
 import           Data.Aeson.Types           (Parser, typeMismatch)
 import qualified Data.ByteString.Lazy.Char8 as C8
 import           Data.Map                   (Map)
 import qualified Data.Map                   as M
 import           Data.Maybe                 (fromMaybe)
 import           Data.Text                  (Text)
+import           Data.Traversable
 import           Data.Vector                (Vector)
 import           GHC.Exts                   (fromList, toList)
 import           GHC.Generics               (Generic)
@@ -87,7 +89,7 @@ data Object = Object { objectId         :: Int
                        -- ^ String assigned to name field in editor
                      , objectType       :: Text
                        -- ^ String assigned to type field in editor
-                     , objectProperties :: Map Text Text
+                     , objectProperties :: Map Text Property
                        -- ^ String key-value pairs
                      , objectVisible    :: Bool
                        -- ^ Whether object is shown in editor.
@@ -115,7 +117,7 @@ instance FromJSON Object where
                                   <*> o .: "height"
                                   <*> o .: "name"
                                   <*> o .: "type"
-                                  <*> parseDefault o "properties" M.empty
+                                  <*> fmap mkProperties (o .: "properties" <|> pure mempty)
                                   <*> o .: "visible"
                                   <*> o .: "x"
                                   <*> o .: "y"
@@ -239,14 +241,14 @@ instance ToJSON Frame where
 
 
 data Tile = Tile { tileId          :: LocalId
-                 , tileProperties  :: Map Text Text
+                 , tileProperties  :: Map Text Property
                  , tileImage       :: Maybe Value
                  , tileObjectGroup :: Maybe (Vector Object)
                  , tileAnimation   :: Maybe (Vector Frame)
                  } deriving (Eq, Generic, Show)
 
 instance FromJSON Tile where
-  parseJSON (A.Object o) = Tile 0 <$> (o .: "properties"  <|> pure mempty)
+  parseJSON (A.Object o) = Tile 0 <$> (mkProperties <$> (o .: "properties"  <|> pure mempty))
                                   <*> (o .: "image"       <|> pure Nothing)
                                   <*> (o .: "objectGroup" <|> pure mempty)
                                   <*> (o .: "animation"   <|> pure mempty)
@@ -294,16 +296,46 @@ data Tileset = Tileset { tilesetFirstgid       :: GlobalId
                          -- ^ Tiles (optional)
                        } deriving (Eq, Generic, Show)
 
-newtype TransitiveTilesetMap = TransitiveTilesetMap (Map LocalId Value)
-  deriving (Show, Eq, Generic, FromJSON)
+data TileObj = TileObj
+  { to_id :: LocalId
+  , to_v :: Value
+  }
+  deriving (Show, Eq, Generic)
+
+instance FromJSON TileObj where
+  parseJSON v@(A.Object o) = TileObj <$> o .: "id" <*> pure v
+
 
 parseTiles :: A.Object -> Parser (Map LocalId Tile)
 parseTiles o = do
-  TransitiveTilesetMap localId2Value <- o .: "tiles"
-  localIdAndTiles <- forM (M.toList localId2Value) $ \(lid, val) -> do
-    tile <- parseJSON val
-    return (lid, tile{ tileId = lid })
-  return $ M.fromList localIdAndTiles
+  localId2Value <- o .: "tiles"
+  fmap M.fromList $ for localId2Value $ \(TileObj lid v) -> do
+    tile <- parseJSON v
+    pure (lid, tile { tileId = lid })
+
+data Property = Property
+  { propertyName :: Text
+  , propertyType :: Text
+  , propertyValue :: Value
+  }
+  deriving (Show, Eq, Generic)
+
+instance ToJSON Property where
+
+instance FromJSON Property where
+  parseJSON = withObject "Property" $ \o ->
+    Property
+      <$> o .: "name"
+      <*> o .: "type"
+      <*> o .: "value"
+
+mkProperties :: [Property] -> Map Text Property
+mkProperties props =
+    M.fromList $ fmap (propertyName &&& id) props
+  -- localIdAndTiles <- forM (M.toList localId2Value) $ \(lid, val) -> do
+  --   tile <- parseJSON val
+  --   return (lid, tile{ tileId = lid })
+  -- return $ M.fromList localIdAndTiles
 
 instance FromJSON Tileset where
   parseJSON (A.Object o) = Tileset <$>  o .: "firstgid"
@@ -403,7 +435,7 @@ data Tiledmap = Tiledmap { tiledmapVersion         :: Version
                            -- ^ Hex-formatted color (#RRGGBB or #AARRGGBB) (optional)
                          , tiledmapRenderorder     :: Text -- TODO: RenderOrder
                            -- ^ Rendering direction (orthogonal maps only)
-                         , tiledmapProperties      :: Map Text Text
+                         , tiledmapProperties      :: Map Text Property
                            -- ^ String key-value pairs
                          , tiledmapNextobjectid    :: Int
                            -- ^ Auto-increments for each placed object
@@ -421,7 +453,7 @@ instance FromJSON Tiledmap where
                                     <*>  o .: "tilesets"
                                     <*> (o .: "backgroundcolor" <|> pure Nothing)
                                     <*>  o .: "renderorder"
-                                    <*> (o .: "properties"      <|> pure mempty)
+                                    <*> fmap mkProperties (o .: "properties"      <|> pure mempty)
                                     <*>  o .: "nextobjectid"
   parseJSON invalid = typeMismatch "Tiledmap" invalid
 
